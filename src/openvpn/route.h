@@ -311,6 +311,23 @@ bool add_route(struct route_ipv4 *r, const struct tuntap *tt, unsigned int flags
                const struct route_gateway_info *rgi, const struct env_set *es,
                openvpn_net_ctx_t *ctx);
 
+#if defined(TARGET_LINUX)
+/**
+ * Route @p host via the original default gateway, unless a host route for it
+ * is already in @p rl. The route is removed together with the other routes.
+ */
+void add_net_gateway_host_route(struct route_list *rl, in_addr_t host, const struct tuntap *tt,
+                                unsigned int flags, const struct env_set *es,
+                                openvpn_net_ctx_t *ctx);
+
+/**
+ * IPv6 counterpart of add_net_gateway_host_route().
+ */
+void add_net_gateway_host_route_ipv6(struct route_ipv6_list *rl6, const struct in6_addr *host,
+                                     const struct tuntap *tt, unsigned int flags,
+                                     const struct env_set *es, openvpn_net_ctx_t *ctx);
+#endif
+
 void add_route_to_option_list(struct route_option_list *l, const char *network, const char *netmask,
                               const char *gateway, const char *metric, int table_id);
 

@@ -158,6 +158,10 @@ the local and the remote host.
   subflows also requires kernel-side endpoint configuration, enabling the
   option alone yields a single-subflow connection.
 
+  If a subflow towards an address announced by the server is routed into the
+  tunnel, e.g. by ``--redirect-gateway``, OpenVPN drops its packets and routes
+  that address via the original default gateway (Linux 5.16 or newer).
+
   This option is only supported on Linux and requires kernel MPTCP support.
   If an MPTCP socket cannot be created, OpenVPN logs a warning and falls back
   to a plain TCP socket. ``--mptcp`` disables data channel offload, and

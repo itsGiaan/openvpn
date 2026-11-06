@@ -1204,6 +1204,79 @@ delete_routes_v6(struct route_ipv6_list *rl6, const struct tuntap *tt, unsigned 
     }
 }
 
+#if defined(TARGET_LINUX)
+void
+add_net_gateway_host_route(struct route_list *rl, in_addr_t host, const struct tuntap *tt,
+                           unsigned int flags, const struct env_set *es, openvpn_net_ctx_t *ctx)
+{
+    struct route_ipv4 *r;
+    for (r = rl->routes; r; r = r->next)
+    {
+        if (r->network == host && r->netmask == IPV4_NETMASK_HOST)
+        {
+            return;
+        }
+    }
+    if (!(rl->rgi.flags & RGI_ADDR_DEFINED))
+    {
+        return;
+    }
+
+    struct gc_arena gc = gc_new();
+    msg(M_INFO, "ROUTE: %s is routed via tun, adding host route via net_gateway",
+        print_in_addr_t(host, 0, &gc));
+    gc_free(&gc);
+
+    ALLOC_OBJ_CLEAR_GC(r, struct route_ipv4, &rl->gc);
+    r->flags = RT_DEFINED;
+    r->network = host;
+    r->netmask = IPV4_NETMASK_HOST;
+    r->gateway = rl->rgi.gateway.addr;
+    r->next = rl->routes;
+    rl->routes = r;
+    add_route(r, tt, flags | ROUTE_REF_GW, &rl->rgi, es, ctx);
+}
+
+void
+add_net_gateway_host_route_ipv6(struct route_ipv6_list *rl6, const struct in6_addr *host,
+                                const struct tuntap *tt, unsigned int flags,
+                                const struct env_set *es, openvpn_net_ctx_t *ctx)
+{
+    struct route_ipv6 *r6;
+    for (r6 = rl6->routes_ipv6; r6; r6 = r6->next)
+    {
+        if (r6->netbits == 128 && IN6_ARE_ADDR_EQUAL(&r6->network, host))
+        {
+            return;
+        }
+    }
+    if ((rl6->rgi6.flags & (RGI_ADDR_DEFINED | RGI_IFACE_DEFINED))
+        != (RGI_ADDR_DEFINED | RGI_IFACE_DEFINED))
+    {
+        return;
+    }
+
+    struct gc_arena gc = gc_new();
+    msg(M_INFO, "ROUTE6: %s is routed via tun, adding host route via net_gateway_ipv6",
+        print_in6_addr(*host, 0, &gc));
+    gc_free(&gc);
+
+    ALLOC_OBJ_CLEAR_GC(r6, struct route_ipv6, &rl6->gc);
+    r6->network = *host;
+    r6->netbits = 128;
+    if (!(rl6->rgi6.flags & RGI_ON_LINK))
+    {
+        r6->gateway = rl6->rgi6.gateway.addr_ipv6;
+    }
+    r6->metric = 1;
+    r6->iface = rl6->rgi6.iface;
+    r6->flags = RT_DEFINED | RT_METRIC_DEFINED;
+    r6->next = rl6->routes_ipv6;
+    rl6->routes_ipv6 = r6;
+    add_route_ipv6(r6, tt, flags, es, ctx);
+}
+#endif /* if defined(TARGET_LINUX) */
+
 #ifndef ENABLE_SMALL
 
 static const char *

@@ -44,6 +44,10 @@
 #include "tun_afunix.h"
 #include "acc.h"
 
+#if defined(TARGET_LINUX) && defined(HAVE_LINUX_MPTCP_H)
+#include <linux/mptcp.h>
+#endif
+
 #include "memdbg.h"
 
 counter_type link_read_bytes_global;  /* GLOBAL */
@@ -1496,6 +1500,110 @@ drop_if_recursive_routing(struct context *c, struct buffer *buf)
     }
 }
 
+#if defined(TARGET_LINUX) && defined(MPTCP_SUBFLOW_ADDRS)
+/**
+ * Drops packets of our own MPTCP subflows that the OS routed via tun, e.g. a
+ * subflow towards an address announced by the server with --redirect-gateway,
+ * and routes their peer via the original default gateway.
+ */
+static void
+drop_if_mptcp_subflow(struct context *c, struct buffer *buf)
+{
+    const struct link_socket *sock = c->c2.link_sockets ? c->c2.link_sockets[0] : NULL;
+    if (!sock || !(sock->sockflags & SF_MPTCP) || !c->c2.to_link_addr)
+    {
+        return;
+    }
+
+    const struct tuntap *tt = c->c1.tuntap;
+    int offset = 0;
+    const int ip_ver = get_tun_ip_ver(TUNNEL_TYPE(tt), buf, &offset);
+    const uint8_t *ip = BPTR(buf) + offset;
+    const struct openvpn_iphdr *pip = (const struct openvpn_iphdr *)ip;
+    const struct openvpn_ipv6hdr *pip6 = (const struct openvpn_ipv6hdr *)ip;
+    const struct openvpn_sockaddr *remote = &c->c2.to_link_addr->dest;
+    const uint16_t remote_port = remote->addr.sa.sa_family == AF_INET6
+                                     ? remote->addr.in6.sin6_port
+                                     : remote->addr.in4.sin_port;
+    int ip_hlen;
+
+    /* traffic of the tunnel itself uses the tunnel address */
+    if (ip_ver == 4 && BLEN(buf) >= offset + (int)sizeof(*pip)
+        && pip->protocol == OPENVPN_IPPROTO_TCP && ntohl(pip->saddr) != tt->local)
+    {
+        ip_hlen = OPENVPN_IPH_GET_LEN(pip->version_len);
+    }
+    else if (ip_ver == 6 && BLEN(buf) >= offset + (int)sizeof(*pip6)
+             && pip6->nexthdr == OPENVPN_IPPROTO_TCP
+             && !OPENVPN_IN6_ARE_ADDR_EQUAL(&pip6->saddr, &tt->local_ipv6))
+    {
+        ip_hlen = sizeof(*pip6);
+    }
+    else
+    {
+        return;
+    }
+
+    const struct openvpn_tcphdr *tc = (const struct openvpn_tcphdr *)(ip + ip_hlen);
+    if (BLEN(buf) < offset + ip_hlen + (int)sizeof(*tc) || tc->dest != remote_port)
+    {
+        return;
+    }
+
+    struct
+    {
+        struct mptcp_subflow_data d;
+        struct mptcp_subflow_addrs a[8];
+    } sf;
+    CLEAR(sf);
+    sf.d.size_subflow_data = sizeof(sf.d);
+    sf.d.size_user = sizeof(sf.a[0]);
+    socklen_t len = sizeof(sf);
+    if (getsockopt(sock->sd, SOL_MPTCP, MPTCP_SUBFLOW_ADDRS, &sf, &len) != 0
+        || len < sizeof(sf.d))
+    {
+        return;
+    }
+
+    const unsigned int n = (unsigned int)((len - sizeof(sf.d)) / sizeof(sf.a[0]));
+    bool own = false;
+    for (unsigned int i = 0; i < n && !own; i++)
+    {
+        const struct mptcp_subflow_addrs *a = &sf.a[i];
+        if (ip_ver == 4)
+        {
+            own = a->sin_remote.sin_family == AF_INET
+                  && a->sin_remote.sin_addr.s_addr == pip->daddr
+                  && a->sin_remote.sin_port == tc->dest && a->sin_local.sin_port == tc->source;
+        }
+        else
+        {
+            own = a->sin6_remote.sin6_family == AF_INET6
+                  && OPENVPN_IN6_ARE_ADDR_EQUAL(&a->sin6_remote.sin6_addr, &pip6->daddr)
+                  && a->sin6_remote.sin6_port == tc->dest && a->sin6_local.sin6_port == tc->source;
+        }
+    }
+    if (!own)
+    {
+        return;
+    }
+
+    buf->len = 0;
+
+    const unsigned int flags = ROUTE_OPTION_FLAGS(&c->options);
+    if (ip_ver == 4 && c->c1.route_list)
+    {
+        add_net_gateway_host_route(c->c1.route_list, ntohl(pip->daddr), tt, flags, c->c2.es,
+                                   &c->net_ctx);
+    }
+    else if (ip_ver == 6 && c->c1.route_ipv6_list)
+    {
+        add_net_gateway_host_route_ipv6(c->c1.route_ipv6_list, &pip6->daddr, tt, flags, c->c2.es,
+                                        &c->net_ctx);
+    }
+}
+#endif /* if defined(TARGET_LINUX) && defined(MPTCP_SUBFLOW_ADDRS) */
+
 /*
  * Input:  c->c2.buf
  * Output: c->c2.to_link
@@ -1524,6 +1632,9 @@ process_incoming_tun(struct context *c, struct link_socket *out_sock)
         if ((c->options.mode == MODE_POINT_TO_POINT) && (!c->options.allow_recursive_routing))
         {
             drop_if_recursive_routing(c, &c->c2.buf);
+#if defined(TARGET_LINUX) && defined(MPTCP_SUBFLOW_ADDRS)
+            drop_if_mptcp_subflow(c, &c->c2.buf);
+#endif
         }
         /*
          * The --passtos and --mssfix options require
